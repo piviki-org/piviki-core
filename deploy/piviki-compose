@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Founder helper on a host: docker compose with the piviki project, the checkout's compose file
+# and the image tag deploy.sh last recorded (AD-21). The bootstrap links it as
+# /usr/local/sbin/piviki-compose.
+#   sudo piviki-compose ps
+#   printf '%s\n%s\n' "$EMAIL" "$PASSWORD" | sudo piviki-compose run --rm -T core seed-librarian
+set -euo pipefail
+DEPLOY_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd -P)"
+STATE_FILE="${PIVIKI_STATE_DIR:-/var/lib/piviki}/compose.env"
+[[ $EUID -eq 0 ]] || { echo "run as root (sudo)" >&2; exit 1; }
+[[ -s "$STATE_FILE" ]] || { echo "no deploy recorded yet ($STATE_FILE); run a deploy first" >&2; exit 1; }
+exec docker compose --env-file "$STATE_FILE" -f "$DEPLOY_DIR/compose.yml" "$@"

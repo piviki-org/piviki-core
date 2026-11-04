@@ -1,0 +1,138 @@
+# Builds and pushes the core image to GHCR with an immutable `<commit>-<YYYYMMDD>` tag (AD-17).
+# Never deploys: deploying is the manual deploy workflow.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Monthly rebuild under a new tag, so base images and OS packages get patched (AD-17).
+    - cron: '17 4 1 * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  # Never on main: every merged commit gets its image (a founder may --move-core to it).
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  IMAGE: ghcr.io/piviki-org/piviki-core
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      # Tests start their own real Postgres (embedded-postgres).
+      - run: pnpm test
+      # The deploy check's Tunnel connector count, against fake Cloudflare replies (AD-17).
+      - run: deploy/test/checks-connector.test.sh
+      # deploy.sh's refusals and recording (AD-21), docker faked.
+      - run: deploy/test/deploy.test.sh
+
+  # The built image in the real Compose stack, before anything reaches a host: Caddy's host and
+  # path rules on both hostnames, migrations as the non-superuser role, and the same checks a
+  # deploy runs. The database is new and unseeded, as on a first deploy (AD-5).
+  stack:
+    needs: test
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+        working-directory: deploy
+    env:
+      CORE_TAG: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and start the local stack
+        run: |
+          dc() { docker compose -f compose.yml -f compose.local.yml "$@"; }
+          dc build core
+          dc up -d --wait postgres
+          dc run --rm --no-deps -T core migrate
+          dc up -d --wait
+          dc ps
+      - name: Deploy checks through Caddy
+        run: ./checks.sh local
+      - name: In-network checks, as deploy.sh runs them
+        run: |
+          docker run --rm --network piviki_edge --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            -v "$PWD/host-checks.mjs:/checks.mjs:ro" \
+            -e ADMIN_HOST=admin.localhost -e API_HOST=api.localhost \
+            -e ADMIN_ORIGIN=http://admin.localhost:8080 \
+            --entrypoint node piviki-core:local /checks.mjs
+      - name: Core is non-root, read-only and has no outbound route
+        run: |
+          dc() { docker compose -f compose.yml -f compose.local.yml "$@"; }
+          [[ "$(dc exec -T core id -u)" != 0 ]]
+          [[ "$(docker inspect "$(dc ps -q core)" --format '{{.HostConfig.ReadonlyRootfs}}')" == true ]]
+          dc exec -T core node -e "fetch('https://example.com',{signal:AbortSignal.timeout(3000)}).then(()=>process.exit(1),()=>process.exit(0))"
+      - name: Logs on failure
+        if: failure()
+        run: docker compose -f compose.yml -f compose.local.yml logs --no-color --tail 200
+
+  image:
+    needs: [test, stack]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: tag
+        name: Compute immutable tag
+        run: echo "tag=${GITHUB_SHA::12}-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse to overwrite an existing tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if docker manifest inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
+            echo "::error::$IMAGE:$TAG already exists; tags are immutable"
+            exit 1
+          fi
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          pull: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Summary
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: echo "Pushed \`$IMAGE:$TAG\`" >> "$GITHUB_STEP_SUMMARY"

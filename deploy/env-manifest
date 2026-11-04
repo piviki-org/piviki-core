@@ -1,0 +1,14 @@
+# Env-file manifest (AD-21): exactly the files under /etc/piviki and the keys each holds.
+# The piviki-infra bootstrap creates these files empty (0600 root) from this list; deploy.sh
+# refuses to deploy while one is missing, lacks a key or has an empty value. Values are never
+# here: a founder fills them from Bitwarden (piviki-infra docs/secrets-inventory.md). KEY=value
+# sets a non-secret default the bootstrap writes. A file name ending in `?` is optional: its
+# file must exist with its keys, but the values may stay empty.
+#
+# file            keys
+core.env          DATABASE_URL PAYLOAD_SECRET SERVER_URL CORS_ORIGINS CSRF_ORIGINS
+postgres.env      POSTGRES_PASSWORD PIVIKI_CORE_DB_PASSWORD
+caddy.env         ADMIN_HOST API_HOST ADMIN_ORIGIN PUBLIC_SCHEME=https
+cloudflared.env   TUNNEL_TOKEN
+# Filled only if the GHCR package is private.
+ghcr.env?         GHCR_USER GHCR_TOKEN

@@ -1,0 +1,9 @@
+# The host runtime runs as root on every host (AD-21), and the image runs on every host: a change
+# to either, or to how they are built and deployed, needs a founder's review. Enforced by the main branch rule "Require review from Code Owners".
+# The team must exist (Org > Teams > founders, both founders as members).
+/deploy/                     @piviki-org/founders
+/.github/workflows/deploy.yml @piviki-org/founders
+/.github/workflows/build.yml @piviki-org/founders
+/Dockerfile                  @piviki-org/founders
+/docker/                     @piviki-org/founders
+/.github/CODEOWNERS          @piviki-org/founders

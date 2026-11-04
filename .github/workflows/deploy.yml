@@ -1,0 +1,165 @@
+# Manual deploy (AD-17): names one GitHub Environment and one image tag. The runner reaches the
+# host's limited deploy user over SSH through the host's own Tunnel with an Access service token,
+# never a public address; the host only pulls. Every deploy then runs the first-register, path
+# allowlist and one-connector checks against the target's own hosts and records the tag.
+# The checks are this repository's deploy/checks.sh at the tag's commit; the host refuses the
+# tag unless its piviki-core checkout has the same deploy/ (AD-21). piviki-infra is never
+# checked out here.
+#
+# Per-environment configuration (Settings > Environments > production|test):
+#   vars:    ADMIN_HOST, API_HOST, SSH_HOST, CF_ACCOUNT_ID, CF_TUNNEL_ID, DEPLOY_SSH_KNOWN_HOSTS,
+#            PUBLIC_RECORDS_ENABLED ('true' once the admin/api records exist)
+#   secrets: DEPLOY_SSH_KEY, CF_ACCESS_DEPLOY_CLIENT_ID, CF_ACCESS_DEPLOY_CLIENT_SECRET,
+#            CF_ACCESS_CHECKS_CLIENT_ID, CF_ACCESS_CHECKS_CLIENT_SECRET, CF_TUNNEL_READ_TOKEN
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: environment
+        required: true
+      tag:
+        description: Image tag, <12-hex-commit>-<YYYYMMDD>
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+# `shell: bash` runs steps with -eo pipefail, so a failure piped into tee fails the step.
+defaults:
+  run:
+    shell: bash
+
+env:
+  IMAGE: ghcr.io/piviki-org/piviki-core
+  CLOUDFLARED_VERSION: 2026.10.7
+  CLOUDFLARED_SHA256: 1f99fb518b83dec2ba8d870a7cc991d82a77e6196295a3d2754ba17ab9f91872
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment:
+      name: ${{ inputs.environment }}
+      url: https://${{ vars.ADMIN_HOST }}/admin
+    permissions:
+      contents: read
+      packages: read
+      deployments: write
+    env:
+      TARGET: ${{ inputs.environment }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Validate inputs
+        run: |
+          case "$TARGET" in production|test) ;; *) echo "::error::unknown environment $TARGET"; exit 1 ;; esac
+          [[ "$TAG" =~ ^[0-9a-f]{12}-[0-9]{8}$ ]] || { echo "::error::tag must be <12-hex-commit>-<YYYYMMDD>"; exit 1; }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tag commit is on main; use its deploy checks
+        run: |
+          commit="${TAG%%-*}"
+          full="$(git rev-parse --verify --quiet "${commit}^{commit}")" || { echo "::error::commit $commit is not in piviki-core"; exit 1; }
+          git merge-base --is-ancestor "$full" origin/main || { echo "::error::commit $commit is not on main"; exit 1; }
+          git -c advice.detachedHead=false checkout --quiet --detach "$full"
+          echo "TAG_COMMIT=$full" >> "$GITHUB_ENV"
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image exists
+        run: docker manifest inspect "$IMAGE:$TAG" >/dev/null
+
+      - name: Install cloudflared ${{ env.CLOUDFLARED_VERSION }}
+        run: |
+          curl -fsSL -o cloudflared "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64"
+          echo "${CLOUDFLARED_SHA256}  cloudflared" | sha256sum -c -
+          sudo install -m 0755 cloudflared /usr/local/bin/cloudflared
+
+      - name: SSH configuration
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ vars.DEPLOY_SSH_KNOWN_HOSTS }}
+          SSH_HOST: ${{ vars.SSH_HOST }}
+        run: |
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 0600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<CONF
+          Host ${SSH_HOST}
+            User deploy
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            ProxyCommand /usr/local/bin/cloudflared access ssh --hostname %h
+            ServerAliveInterval 15
+          CONF
+
+      - name: Deploy on the host
+        env:
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.CF_ACCESS_DEPLOY_CLIENT_ID }}
+          TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.CF_ACCESS_DEPLOY_CLIENT_SECRET }}
+        # Pulls, migrates before the new core starts, starts it, then runs the first-register,
+        # allowlist and health checks in-network (host-checks.mjs) before recording the tag. The
+        # host refuses the tag if its checkout's deploy/ differs from the tag's commit (AD-21).
+        run: ssh "$SSH_HOST" "deploy $TARGET $TAG" | tee deploy.txt
+
+      - name: Deploy checks
+        env:
+          ADMIN_HOST: ${{ vars.ADMIN_HOST }}
+          API_HOST: ${{ vars.API_HOST }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CHECKS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CHECKS_CLIENT_SECRET }}
+          CF_API_TOKEN: ${{ secrets.CF_TUNNEL_READ_TOKEN }}
+          CF_ACCOUNT_ID: ${{ vars.CF_ACCOUNT_ID }}
+          CF_TUNNEL_ID: ${{ vars.CF_TUNNEL_ID }}
+          # Before the records exist (first deploy, AD-5) the HTTP checks ran in-network on the
+          # host inside `deploy`; the connector check always runs here.
+          SKIP_PUBLIC: ${{ vars.PUBLIC_RECORDS_ENABLED == 'true' && '0' || '1' }}
+        run: deploy/checks.sh "$TARGET" | tee checks.txt
+
+      - name: Confirm and record the running tag
+        env:
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.CF_ACCESS_DEPLOY_CLIENT_ID }}
+          TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.CF_ACCESS_DEPLOY_CLIENT_SECRET }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          status="$(ssh "$SSH_HOST" status)"
+          echo "$status"
+          grep -qx "environment=$TARGET" <<<"$status"
+          grep -qx "tag=$TAG" <<<"$status"
+          # A deployment record per environment whose payload names the running image tag:
+          #   gh api "repos/$GITHUB_REPOSITORY/deployments?environment=production&task=deploy:image&per_page=1"
+          id="$(jq -n --arg ref "$TAG_COMMIT" --arg env "$TARGET" --arg tag "$TAG" --arg image "$IMAGE" '{
+              ref: $ref, environment: $env, task: "deploy:image", auto_merge: false,
+              required_contexts: [], description: ($image + ":" + $tag), payload: { tag: $tag }
+            }' | gh api "repos/$GITHUB_REPOSITORY/deployments" --input - --jq .id)"
+          gh api "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" -f state=success \
+            -f description="running $TAG" >/dev/null
+          {
+            echo "### Deployed \`$TAG\` to \`$TARGET\`"
+            echo '```'
+            cat deploy.txt checks.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

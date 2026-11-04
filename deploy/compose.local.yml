@@ -1,0 +1,23 @@
+# Local stack only, never on a host. From piviki-core/deploy:
+#   CORE_TAG=local docker compose -f compose.yml -f compose.local.yml up -d --build
+#   ./checks.sh local
+# Builds core from this repository, reads ./local-env instead of /etc/piviki, publishes Caddy
+# on 127.0.0.1:8080, and runs no Tunnel.
+services:
+  cloudflared:
+    profiles: [tunnel]
+    env_file: !override [./local-env/cloudflared.env]
+
+  caddy:
+    env_file: !override [./local-env/caddy.env]
+    ports:
+      - "127.0.0.1:8080:80"
+
+  core:
+    image: piviki-core:local
+    build:
+      context: ..
+    env_file: !override [./local-env/core.env]
+
+  postgres:
+    env_file: !override [./local-env/postgres.env]

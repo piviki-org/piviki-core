@@ -1,0 +1,86 @@
+# Host and path routing on the private network (AD-5, AD-17). TLS ends at Cloudflare; the
+# Tunnel reaches Caddy over plain HTTP inside the `edge` network. Every environment-specific
+# value comes from caddy.env:
+#   ADMIN_HOST     e.g. admin.piviki.fi
+#   API_HOST       e.g. api.piviki.fi
+#   ADMIN_ORIGIN   e.g. https://admin.piviki.fi  (exact Origin accepted on the admin host)
+#   PUBLIC_SCHEME  https in every hosted environment; http only for the local stack
+#   CORE_UPSTREAM  optional, defaults to core:3000
+#   CADDY_LISTEN   optional, defaults to :80 (plain HTTP; Cloudflare terminates TLS)
+{
+	admin off
+	auto_https off
+	persist_config off
+	log {
+		output stdout
+		format json
+	}
+}
+
+http://{$CADDY_LISTEN::80} {
+	# Ids, never query strings, in logs (AD-14): log only method, host, path and status.
+	log {
+		format filter {
+			request>uri delete
+			request>headers delete
+			resp_headers delete
+		}
+	}
+
+	header -Server
+
+	# Caddy's path matchers see the decoded, cleaned path, so `..`, `%2e%2e` and `%2f` are already
+	# resolved before any rule below runs: a traversal cannot walk out of a prefix check (verified
+	# 2026-11-04: first-register, GraphQL and the api allowlist all 404 through traversal). This
+	# rule therefore only ever catches a backslash; it stays as a belt-and-braces refusal.
+	@dotdot {
+		path_regexp dotdot (?i)(^|/)(\.|%2e){1,2}(/|$)|%2f|%5c|\\
+	}
+	handle @dotdot {
+		respond 404
+	}
+
+	@admin host {$ADMIN_HOST}
+	handle @admin {
+		header X-Robots-Tag "noindex, nofollow"
+
+		# Payload's unauthenticated first-user route is never served (AD-5).
+		@firstRegister path /admin/create-first-user /admin/create-first-user/* /api/*/first-register /api/*/first-register/*
+		respond @firstRegister 404
+
+		# Only the admin host's own origin may send an Origin header (AD-7).
+		@foreignOrigin {
+			header Origin *
+			not header Origin {$ADMIN_ORIGIN}
+		}
+		respond @foreignOrigin 403
+
+		# GraphQL is off in core; never route it either.
+		@graphql path /api/graphql /api/graphql/* /api/graphql-playground /api/graphql-playground/*
+		respond @graphql 404
+
+		reverse_proxy {$CORE_UPSTREAM:core:3000} {
+			header_up X-Forwarded-Proto {$PUBLIC_SCHEME}
+		}
+	}
+
+	@api host {$API_HOST}
+	handle @api {
+		header X-Robots-Tag "noindex, nofollow"
+
+		# api serves only /api/v1 (AD-5).
+		handle /api/v1/* {
+			reverse_proxy {$CORE_UPSTREAM:core:3000} {
+				header_up X-Forwarded-Proto {$PUBLIC_SCHEME}
+			}
+		}
+		handle {
+			respond 404
+		}
+	}
+
+	# Unknown host.
+	handle {
+		respond 404
+	}
+}
