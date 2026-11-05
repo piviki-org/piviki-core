@@ -40,6 +40,8 @@ jobs:
       - run: pnpm test
       # The deploy check's Tunnel connector count, against fake Cloudflare replies (AD-17).
       - run: deploy/test/checks-connector.test.sh
+      # Production-mode checks: admin must redirect to Access; no Access token is ever sent.
+      - run: deploy/test/checks-public.test.sh
       # deploy.sh's refusals and recording (AD-21), docker faked.
       - run: deploy/test/deploy.test.sh
 

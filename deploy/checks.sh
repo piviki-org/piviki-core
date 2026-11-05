@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Deploy checks (AD-5, AD-17), run after every deploy against the target's own hosts:
-#   1. first-register returns 404 (admin view and REST route)
+# Deploy checks (AD-5, AD-7, AD-17), run after every deploy against the target's own hosts:
+#   1. admin is behind Access: an unauthenticated request is redirected to the Access login
+#      (production/test). Nothing here passes Access; the admin-side checks (first-register 404,
+#      Origin rules, login reachable) run behind it, in-network, in deploy.sh (host-checks.mjs).
 #   2. api path allowlist: only /api/v1/* is served; everything else 404
 #   3. /api/v1/health is 200
 #   4. exactly one Tunnel connector (Cloudflare API); skipped for `local`
-# Plus the I/O matrix extras: foreign Origin on admin is 403, unknown host is 404 (local only).
+# For `local` (no Access), the admin-side checks run here too, plus unknown host 404.
 #
 # Usage: checks.sh local|production|test
 #
 # Environment for production/test (from the GitHub Environment):
 #   ADMIN_HOST, API_HOST                 the target's host names
-#   CF_ACCESS_CLIENT_ID/SECRET           Access service token allowed on the admin app
 #   CF_API_TOKEN                         Cloudflare token with Tunnel read permission
 #   CF_ACCOUNT_ID, CF_TUNNEL_ID          the target's Tunnel
 #   SKIP_PUBLIC=1                        before the admin/api records exist (first deploy):
@@ -33,7 +34,6 @@ case "$target" in
   production | test)
     if [[ "${SKIP_PUBLIC:-}" != 1 ]]; then
       : "${ADMIN_HOST:?}" "${API_HOST:?}"
-      : "${CF_ACCESS_CLIENT_ID:?}" "${CF_ACCESS_CLIENT_SECRET:?}"
     fi
     : "${CF_API_TOKEN:?}" "${CF_ACCOUNT_ID:?}" "${CF_TUNNEL_ID:?}"
     scheme=https
@@ -49,11 +49,6 @@ esac
 admin="${scheme}://${ADMIN_HOST:-}${host_port}"
 api="${scheme}://${API_HOST:-}${host_port}"
 admin_origin="${scheme}://${ADMIN_HOST:-}${host_port}"
-
-access_headers=()
-if [[ -n "${CF_ACCESS_CLIENT_ID:-}" ]]; then
-  access_headers=(-H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}")
-fi
 
 failures=0
 pass() { printf 'PASS  %s\n' "$1"; }
@@ -85,13 +80,45 @@ expect() {
   if [[ "$got" == "$want" ]]; then pass "$label ($got)"; else fail "$label: want $want, got $got"; fi
 }
 
-public_checks() {
+# Access answers an unauthenticated request with a redirect to <team>.cloudflareaccess.com; the
+# request never reaches the Tunnel. Anything else (200, a Payload page, 404 from Caddy) means
+# admin is reachable without Access.
+expect_access_redirect() {
+  local got
+  got="$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 20 "$@" || true)"
+  if [[ "$got" =~ ^30[237]\ https://[a-z0-9-]+\.cloudflareaccess\.com/ ]]; then
+    pass "admin is behind Access (${got%% *} to ${got#* }); first-register, Origin and login ran in-network"
+  else
+    fail "admin without Access: want a redirect to *.cloudflareaccess.com, got $got"
+  fi
+}
+
+# Only where nothing sits in front of Caddy (local): on hosted targets these run in-network.
+admin_checks() {
   echo "== first-register"
-  expect 404 "admin GET /admin/create-first-user" "${access_headers[@]}" "$admin/admin/create-first-user"
-  expect 404 "admin POST /api/librarians/first-register" "${access_headers[@]}" \
+  expect 404 "admin GET /admin/create-first-user" "$admin/admin/create-first-user"
+  expect 404 "admin POST /api/librarians/first-register" \
     -X POST -H 'Content-Type: application/json' -H "Origin: $admin_origin" \
     --data '{"email":"check@invalid.example","password":"not-a-real-password"}' \
     "$admin/api/librarians/first-register"
+
+  echo "== admin Origin"
+  expect 403 "admin POST with Origin https://evil.example" \
+    -X POST -H 'Content-Type: application/json' -H 'Origin: https://evil.example' \
+    --data '{}' "$admin/api/librarians/login"
+  # A wrong ADMIN_ORIGIN in caddy.env would answer 403 to every real login.
+  expect 401 "admin POST login with its own Origin reaches Payload" \
+    -X POST -H 'Content-Type: application/json' -H "Origin: $admin_origin" \
+    --data '{"email":"check@invalid.example","password":"not-a-real-password"}' "$admin/api/librarians/login"
+}
+
+public_checks() {
+  if [[ "$target" == local ]]; then
+    admin_checks
+  else
+    echo "== admin behind Access"
+    expect_access_redirect "$admin/admin"
+  fi
 
   echo "== api path allowlist"
   for path in / /admin /admin/login /api/librarians /api/librarians/me /api/librarians/first-register \
@@ -103,15 +130,6 @@ public_checks() {
 
   echo "== health"
   expect 200 "api /api/v1/health" "$api/api/v1/health"
-
-  echo "== admin Origin"
-  expect 403 "admin POST with Origin https://evil.example" "${access_headers[@]}" \
-    -X POST -H 'Content-Type: application/json' -H 'Origin: https://evil.example' \
-    --data '{}' "$admin/api/librarians/login"
-  # A wrong ADMIN_ORIGIN in caddy.env would answer 403 to every real login.
-  expect 401 "admin POST login with its own Origin reaches Payload" "${access_headers[@]}" \
-    -X POST -H 'Content-Type: application/json' -H "Origin: $admin_origin" \
-    --data '{"email":"check@invalid.example","password":"not-a-real-password"}' "$admin/api/librarians/login"
 }
 
 if [[ "${SKIP_PUBLIC:-}" == 1 ]]; then
