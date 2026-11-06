@@ -86,6 +86,7 @@ host_checks() {
   docker run --rm --network piviki_edge --read-only --cap-drop ALL \
     --security-opt no-new-privileges:true \
     -v "$DEPLOY_DIR/host-checks.mjs:/checks.mjs:ro" \
+    -e ENVIRONMENT="$host_env" \
     -e ADMIN_HOST="$(sed -n 's/^ADMIN_HOST=//p' "$caddy_env")" \
     -e API_HOST="$(sed -n 's/^API_HOST=//p' "$caddy_env")" \
     -e ADMIN_ORIGIN="$(sed -n 's/^ADMIN_ORIGIN=//p' "$caddy_env")" \
@@ -122,7 +123,9 @@ case "$cmd" in
     previous="$(current_tag)"
     next_state="$(mktemp "$STATE_DIR/compose.env.XXXXXX")"
     trap 'rm -f "$next_state"' EXIT
-    printf 'CORE_TAG=%s\n' "$tag" >"$next_state"
+    # The environment name has one source, /etc/piviki/environment; Compose passes it to core,
+    # which refuses host names that disagree with it (AD-17).
+    printf 'CORE_TAG=%s\nENVIRONMENT=%s\n' "$tag" "$host_env" >"$next_state"
 
     if [[ -s "$ETC_DIR/ghcr.env" ]] && grep -q '^GHCR_TOKEN=.' "$ETC_DIR/ghcr.env"; then
       GHCR_USER="$(sed -n 's/^GHCR_USER=//p' "$ETC_DIR/ghcr.env")"

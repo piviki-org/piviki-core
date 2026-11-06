@@ -46,6 +46,10 @@ services:
   core:
     image: ghcr.io/piviki-org/piviki-core:${CORE_TAG:?CORE_TAG is set by deploy.sh}
     env_file: /etc/piviki/core.env # DATABASE_URL, PAYLOAD_SECRET, SERVER_URL, CORS_ORIGINS, CSRF_ORIGINS
+    environment:
+      # From the host's /etc/piviki/environment, written by deploy.sh next to CORE_TAG; core
+      # refuses to start when a host name disagrees with it (AD-17).
+      ENVIRONMENT: ${ENVIRONMENT:?ENVIRONMENT is set by deploy.sh}
     restart: unless-stopped
     read_only: true
     tmpfs:

@@ -1,5 +1,5 @@
 # Local stack only, never on a host. From piviki-core/deploy:
-#   CORE_TAG=local docker compose -f compose.yml -f compose.local.yml up -d --build
+#   CORE_TAG=local ENVIRONMENT=local docker compose -f compose.yml -f compose.local.yml up -d --build
 #   ./checks.sh local
 # Builds core from this repository, reads ./local-env instead of /etc/piviki, publishes Caddy
 # on 127.0.0.1:8080, and runs no Tunnel.
@@ -18,6 +18,9 @@ services:
     build:
       context: ..
     env_file: !override [./local-env/core.env]
+    environment:
+      # Always local here, whatever the shell exports (compose.yml needs the variable set).
+      ENVIRONMENT: local
 
   postgres:
     env_file: !override [./local-env/postgres.env]

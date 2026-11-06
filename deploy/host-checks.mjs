@@ -3,15 +3,47 @@
 // before the public admin/api records exist (the first deploy precedes seeding) and are not
 // affected by Access. Runs with the core image's node in a throwaway container:
 //   docker run --rm --network piviki_edge -v .../host-checks.mjs:/checks.mjs:ro \
-//     -e ADMIN_HOST -e API_HOST -e ADMIN_ORIGIN --entrypoint node <core image> /checks.mjs
+//     -e ENVIRONMENT -e ADMIN_HOST -e API_HOST -e ADMIN_ORIGIN \
+//     --entrypoint node <core image> /checks.mjs
 import http from 'node:http'
 
 const CADDY = process.env.CADDY_ADDR ?? 'caddy'
 const PORT = Number(process.env.CADDY_PORT ?? 80)
-const { ADMIN_HOST, API_HOST, ADMIN_ORIGIN } = process.env
-if (!ADMIN_HOST || !API_HOST || !ADMIN_ORIGIN) {
-  console.error('ADMIN_HOST, API_HOST and ADMIN_ORIGIN are required')
+const { ENVIRONMENT, ADMIN_HOST, API_HOST, ADMIN_ORIGIN } = process.env
+if (!ENVIRONMENT || !ADMIN_HOST || !API_HOST || !ADMIN_ORIGIN) {
+  console.error('ENVIRONMENT, ADMIN_HOST, API_HOST and ADMIN_ORIGIN are required')
   process.exit(64)
+}
+
+// The naming rule core applies to its origins (src/env.ts hostAgrees), on caddy.env's hosts
+// (AD-17): on test, a first label `test` or starting `test-`; on production, neither; on local,
+// only localhost names. Checked before any request.
+function hostAgrees(environment, host) {
+  const name = host.toLowerCase().replace(/\.$/, '')
+  if (!name) return false // a missing or unparsable value never agrees
+  const first = name.split('.')[0]
+  const testNamed = first === 'test' || first.startsWith('test-')
+  if (environment === 'test') return testNamed
+  if (environment === 'production') return !testNamed
+  if (environment === 'local') return name === 'localhost' || name.endsWith('.localhost')
+  return false
+}
+let originHost = ''
+try {
+  originHost = new URL(ADMIN_ORIGIN).hostname
+} catch {
+  // reported below as a disagreeing host
+}
+const disagreeing = [
+  ['ADMIN_HOST', ADMIN_HOST, ADMIN_HOST],
+  ['API_HOST', API_HOST, API_HOST],
+  ['ADMIN_ORIGIN', ADMIN_ORIGIN, originHost],
+].filter(([, , host]) => !hostAgrees(ENVIRONMENT, host))
+if (disagreeing.length) {
+  for (const [name, value] of disagreeing) {
+    console.log(`FAIL  ${name}=${value} is not a ${ENVIRONMENT} host name; no request sent`)
+  }
+  process.exit(1)
 }
 
 function status(host, path, { method = 'GET', headers = {}, body } = {}) {

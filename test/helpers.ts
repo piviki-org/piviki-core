@@ -19,7 +19,7 @@ export async function resetLibrarians(payload: Payload): Promise<void> {
   await payload.db.pool.query('truncate table librarians restart identity cascade')
 }
 
-export const SERVER = 'https://admin.piviki.test'
+export const SERVER = 'https://admin.localhost'
 
 export function apiRequest(
   path: string,

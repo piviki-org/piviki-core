@@ -18,7 +18,7 @@ Payload CMS 3 on Next.js: the librarian admin at `admin.piviki.fi` and the publi
 | `pnpm install --frozen-lockfile` | | Dependencies |
 | `pnpm typecheck` | | TypeScript |
 | `pnpm test` | | Tests on a real Postgres 18 that the tests start themselves (embedded-postgres) |
-| `deploy/test/checks-connector.test.sh`, `deploy/test/deploy.test.sh` | `jq`, `git` | Deploy-script tests, Docker and network faked |
+| `deploy/test/*.test.sh` | `jq`, `git`, `node` | Deploy-script and check tests, Docker and network faked |
 | `pnpm build` | | Production build (no configuration needed) |
 | local stack, see [`deploy/README.md`](deploy/README.md) | Docker | The image behind Caddy on `http://admin.localhost:8080` |
 

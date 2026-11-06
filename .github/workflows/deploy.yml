@@ -9,6 +9,8 @@
 # Per-environment configuration (Settings > Environments > production|test):
 #   vars:    ADMIN_HOST, API_HOST, SSH_HOST, CF_ACCOUNT_ID, CF_TUNNEL_ID, DEPLOY_SSH_KNOWN_HOSTS,
 #            PUBLIC_RECORDS_ENABLED ('true' once the admin/api records exist)
+#            ADMIN_HOST and API_HOST must agree with the environment name (test: test-admin…,
+#            test-api…; production: no `test` first label); checks.sh fails otherwise
 #   secrets: DEPLOY_SSH_KEY, CF_ACCESS_DEPLOY_CLIENT_ID, CF_ACCESS_DEPLOY_CLIENT_SECRET,
 #            CF_TUNNEL_READ_TOKEN
 name: deploy
