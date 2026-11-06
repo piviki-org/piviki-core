@@ -14,6 +14,8 @@
 #   ADMIN_HOST, API_HOST                 the target's host names
 #   CF_API_TOKEN                         Cloudflare token with Tunnel read permission
 #   CF_ACCOUNT_ID, CF_TUNNEL_ID          the target's Tunnel
+# Before any request, every host given must agree with the target's name (AD-17): on test, a
+# first label `test` or starting `test-`; on production, neither; on local, localhost names.
 #   SKIP_PUBLIC=1                        before the admin/api records exist (first deploy):
 #                                        skip the HTTP checks here; deploy.sh has already run
 #                                        the same checks in-network (host-checks.mjs)
@@ -45,6 +47,27 @@ case "$target" in
     exit 64
     ;;
 esac
+
+# The naming rule core applies to its origins (src/env.ts hostAgrees), on the hosts given here.
+host_agrees() { # <environment> <host>
+  local host="${2,,}" first
+  host="${host%.}"
+  first="${host%%.*}"
+  case "$1" in
+    test) [[ "$first" == test || "$first" == test-* ]] ;;
+    production) [[ "$first" != test && "$first" != test-* ]] ;;
+    local) [[ "$host" == localhost || "$host" == *.localhost ]] ;;
+    *) return 1 ;;
+  esac
+}
+for var in ADMIN_HOST API_HOST; do
+  value="${!var:-}"
+  [[ -z "$value" ]] && continue
+  if ! host_agrees "$target" "$value"; then
+    echo "FAIL  $var=$value is not a $target host name; no request sent" >&2
+    exit 1
+  fi
+done
 
 admin="${scheme}://${ADMIN_HOST:-}${host_port}"
 api="${scheme}://${API_HOST:-}${host_port}"

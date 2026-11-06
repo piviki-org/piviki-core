@@ -76,6 +76,17 @@ expect_recorded "  ... and is recorded, with the checkout commit in the history"
 if grep -q "previous=$c1-$d	checkout=$c2" "$tmp/state/deploys.log"; then echo "PASS  history names previous and checkout"
 else echo "FAIL  history line"; failed=1; fi
 
+if grep -qx "ENVIRONMENT=production" "$tmp/state/compose.env"; then
+  echo "PASS  the recorded state passes the host's environment name to Compose"
+else
+  echo "FAIL  compose.env has no ENVIRONMENT=production"; failed=1
+fi
+if grep -q "checks.mjs" "$tmp/docker.log" && grep "checks.mjs" "$tmp/docker.log" | grep -q -- "-e ENVIRONMENT=production"; then
+  echo "PASS  the in-network checks get the host's environment name"
+else
+  echo "FAIL  host-checks.mjs ran without ENVIRONMENT=production"; failed=1
+fi
+
 run "a commit whose deploy/ differs is refused" 1 "deploy production $c3-$d"
 grep -q "deploy/ at $c3 differs" "$tmp/out" || { echo "FAIL  refusal names the deploy/ mismatch"; failed=1; }
 run "an unknown commit is refused" 1 "deploy production abcdefabcdef-$d"

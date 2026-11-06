@@ -49,7 +49,52 @@ function readOrigin(name: string): string {
   return origin
 }
 
+/** The host's environment name (AD-17): one per host, from `/etc/piviki/environment` via deploy.sh. */
+export const ENVIRONMENTS = ['local', 'test', 'production'] as const
+export type Environment = (typeof ENVIRONMENTS)[number]
+
+function readEnvironment(): Environment | '' {
+  const value = read('ENVIRONMENT')
+  if (!value) return ''
+  if (!(ENVIRONMENTS as readonly string[]).includes(value)) {
+    throw new Error(`ENVIRONMENT: "${value}" must be one of ${ENVIRONMENTS.join(', ')}`)
+  }
+  return value as Environment
+}
+
+/**
+ * The naming rule that keeps one environment's host names out of another's configuration
+ * (AD-17): on `test` every host has a first label `test` or starting `test-`; on `production`
+ * none does; on `local` only `localhost` or `*.localhost`. deploy/checks.sh and
+ * deploy/host-checks.mjs apply the same rule.
+ */
+export function hostAgrees(environment: Environment, host: string): boolean {
+  const name = host.toLowerCase().replace(/\.$/, '')
+  const first = name.split('.')[0] ?? ''
+  const testNamed = first === 'test' || first.startsWith('test-')
+  switch (environment) {
+    case 'test':
+      return testNamed
+    case 'production':
+      return !testNamed
+    case 'local':
+      return name === 'localhost' || name.endsWith('.localhost')
+  }
+}
+
+function assertHostsAgree(environment: Environment, name: string, origins: string[]): void {
+  for (const origin of origins) {
+    const host = new URL(origin).hostname
+    if (!hostAgrees(environment, host)) {
+      throw new Error(
+        `${name}: "${origin}" is not a ${environment} host name (ENVIRONMENT=${environment}); refusing to start`,
+      )
+    }
+  }
+}
+
 export type CoreEnv = {
+  environment: Environment | ''
   databaseURL: string
   payloadSecret: string
   serverURL: string
@@ -62,11 +107,21 @@ export function loadEnv(): CoreEnv {
   if (!isBuildPhase && payloadSecret.length < 32) {
     throw new Error('PAYLOAD_SECRET must be at least 32 characters')
   }
+  const environment = readEnvironment()
+  const serverURL = readOrigin('SERVER_URL')
+  const corsOrigins = readOrigins('CORS_ORIGINS')
+  const csrfOrigins = readOrigins('CSRF_ORIGINS')
+  if (environment) {
+    assertHostsAgree(environment, 'SERVER_URL', serverURL ? [serverURL] : [])
+    assertHostsAgree(environment, 'CORS_ORIGINS', corsOrigins)
+    assertHostsAgree(environment, 'CSRF_ORIGINS', csrfOrigins)
+  }
   return {
+    environment,
     databaseURL: read('DATABASE_URL'),
     payloadSecret,
-    serverURL: readOrigin('SERVER_URL'),
-    corsOrigins: readOrigins('CORS_ORIGINS'),
-    csrfOrigins: readOrigins('CSRF_ORIGINS'),
+    serverURL,
+    corsOrigins,
+    csrfOrigins,
   }
 }

@@ -32,7 +32,7 @@ function isPasswordTooShort(error: unknown): boolean {
   )
 }
 
-const ADMIN_ORIGIN = { Origin: 'https://admin.piviki.test' }
+const ADMIN_ORIGIN = { Origin: 'https://admin.localhost' }
 
 function parseSetCookie(header: string) {
   const [pair, ...attrs] = header.split(';').map((p) => p.trim())

@@ -44,6 +44,8 @@ jobs:
       - run: deploy/test/checks-public.test.sh
       # deploy.sh's refusals and recording (AD-21), docker faked.
       - run: deploy/test/deploy.test.sh
+      # The in-network checks refuse host names that disagree with the environment (AD-17).
+      - run: deploy/test/host-checks-names.test.sh
 
   # The built image in the real Compose stack, before anything reaches a host: Caddy's host and
   # path rules on both hostnames, migrations as the non-superuser role, and the same checks a
@@ -57,6 +59,7 @@ jobs:
         working-directory: deploy
     env:
       CORE_TAG: local
+      ENVIRONMENT: local
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -76,6 +79,7 @@ jobs:
           docker run --rm --network piviki_edge --read-only --cap-drop ALL \
             --security-opt no-new-privileges:true \
             -v "$PWD/host-checks.mjs:/checks.mjs:ro" \
+            -e ENVIRONMENT=local \
             -e ADMIN_HOST=admin.localhost -e API_HOST=api.localhost \
             -e ADMIN_ORIGIN=http://admin.localhost:8080 \
             --entrypoint node piviki-core:local /checks.mjs
