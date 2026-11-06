@@ -93,9 +93,11 @@ jobs:
         if: failure()
         run: docker compose -f compose.yml -f compose.local.yml logs --no-color --tail 200
 
+  # Only main's commits become deployable images (AD-21): a dispatch from another branch builds
+  # and tests but never pushes.
   image:
     needs: [test, stack]
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -107,8 +109,13 @@ jobs:
         with:
           persist-credentials: false
       - id: tag
-        name: Compute immutable tag
-        run: echo "tag=${GITHUB_SHA::12}-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+        name: Compute immutable tag and the host runtime it was built with
+        run: |
+          echo "tag=${GITHUB_SHA::12}-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          # deploy.sh refuses the image unless the host checkout has the same fingerprint (AD-21).
+          runtime="$(git ls-tree -r HEAD -- deploy/ | deploy/fingerprint.sh)"
+          [[ "$runtime" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no host-runtime fingerprint"; exit 1; }
+          echo "host_runtime=$runtime" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
@@ -136,6 +143,7 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
+            fi.piviki.host-runtime=${{ steps.tag.outputs.host_runtime }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Summary

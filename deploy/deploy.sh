@@ -6,7 +6,8 @@
 #   checks                       re-run the in-network checks against the running stack
 #   status                       print the environment, the recorded tag and the checkout commit
 # Only pulls images: nothing is ever built on a host (AD-17). It never fetches, pulls or edits the
-# checkout: a tag is refused unless the checkout is clean and its deploy/ matches the tag's commit.
+# checkout: a tag is refused unless the checkout is clean and its host runtime in deploy/ is the one
+# the image was built with (the image's fi.piviki.host-runtime label, stamped by CI; fingerprint.sh).
 set -euo pipefail
 umask 022
 
@@ -21,6 +22,7 @@ STATE_FILE="$STATE_DIR/compose.env"
 HISTORY="$STATE_DIR/deploys.log"
 LOCK="${PIVIKI_LOCK:-/run/lock/piviki-deploy.lock}"
 IMAGE=ghcr.io/piviki-org/piviki-core
+RUNTIME_LABEL=fi.piviki.host-runtime
 COMPOSE_FILE="$DEPLOY_DIR/compose.yml"
 MANIFEST="$DEPLOY_DIR/env-manifest"
 TAG_RE='^[0-9a-f]{12}-[0-9]{8}$'
@@ -47,17 +49,26 @@ git_core() { git -c safe.directory="$CORE_DIR" -C "$CORE_DIR" "$@"; }
 
 checkout_commit() { git_core rev-parse --short=12 HEAD 2>/dev/null || echo unknown; }
 
-# AD-21: the checkout must be clean, and its deploy/ identical to the deploy/ of the tag's commit.
-# A founder moves the checkout first (piviki-infra bootstrap.sh --move-core <commit>), also
-# before a rollback to an older tag.
-require_matching_checkout() {
-  local commit="${1%%-*}" full dirty
+# AD-21: the checkout must be clean, and the files of deploy/ a host reads identical to those the
+# image was built with. CI labels each image with their fingerprint (fingerprint.sh, build.yml), so a
+# tag whose commit the checkout has never fetched still deploys when only the app changed. A founder
+# moves the checkout when they differ (piviki-infra bootstrap.sh --move-core <commit>), also before a rollback to an older tag.
+require_clean_checkout() {
+  local dirty
   dirty="$(git_core status --porcelain --untracked-files=all)" || die "$CORE_DIR is not a git checkout"
   [[ -z "$dirty" ]] || die "the checkout at $CORE_DIR has local changes; a founder restores it first"
-  full="$(git_core rev-parse --verify --quiet "${commit}^{commit}")" ||
-    die "commit $commit is not in the checkout at $CORE_DIR (HEAD $(checkout_commit)); a founder moves the checkout first: bootstrap.sh --move-core $commit"
-  git_core diff --quiet "$full" HEAD -- deploy/ ||
-    die "deploy/ at $commit differs from the checkout (HEAD $(checkout_commit)); a founder moves the checkout first: bootstrap.sh --move-core $commit"
+}
+
+# Runs after the pull, before anything starts.
+require_matching_host_runtime() {
+  local tag="$1" commit="${1%%-*}" built here
+  built="$(docker image inspect --format "{{ index .Config.Labels \"$RUNTIME_LABEL\" }}" "$IMAGE:$tag")" ||
+    die "cannot inspect $IMAGE:$tag"
+  [[ -n "$built" ]] || die "$IMAGE:$tag has no $RUNTIME_LABEL label (built before it existed); deploy a newer tag"
+  [[ "$built" =~ ^[0-9a-f]{64}$ ]] || die "$IMAGE:$tag has a malformed $RUNTIME_LABEL label; refusing it"
+  here="$(git_core ls-tree -r HEAD -- deploy/ | "$DEPLOY_DIR/fingerprint.sh")" || die "cannot fingerprint the checkout's deploy/"
+  [[ "$built" == "$here" ]] ||
+    die "the host runtime the image $tag was built with differs from the checkout (HEAD $(checkout_commit)); a founder moves the checkout first: bootstrap.sh --move-core $commit"
 }
 
 # Every env file and key the manifest lists must exist with a value, except in a file marked
@@ -117,7 +128,7 @@ case "$cmd" in
     exec 9>"$LOCK"
     flock -n 9 || die "another deploy or a checkout move is running"
 
-    require_matching_checkout "$tag"
+    require_clean_checkout
     require_env_files
 
     previous="$(current_tag)"
@@ -134,6 +145,7 @@ case "$cmd" in
 
     echo "== pull $IMAGE:$tag"
     compose "$next_state" pull --quiet
+    require_matching_host_runtime "$tag"
 
     echo "== database"
     compose "$next_state" up -d --wait postgres

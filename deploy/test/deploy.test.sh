@@ -8,17 +8,24 @@ src="$here/.."
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT # only the folder this test created
 mkdir -p "$tmp"/{repo,etc,state,bin}
+failed=0
 
-# Fake docker: logs every call; the in-network checks fail when FAKE_CHECKS_FAIL=1.
+# Fake docker: logs every call; `image inspect` prints FAKE_TREE as the image's host-runtime
+# label (CI's fi.piviki.host-runtime); the in-network checks fail when FAKE_CHECKS_FAIL=1.
 cat >"$tmp/bin/docker" <<'FAKE'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"
+if [[ "$1 $2" == "image inspect" ]]; then
+  [[ "$*" == *fi.piviki.host-runtime* ]] || exit 1
+  printf '%s\n' "$FAKE_TREE"; exit 0
+fi
 if [[ "${FAKE_CHECKS_FAIL:-}" == 1 && "$*" == *checks.mjs* ]]; then exit 1; fi
 exit 0
 FAKE
 chmod +x "$tmp/bin/docker"
 
-# The checkout: c1 (base), c2 (app change only, HEAD), c3 (deploy/ change, not checked out).
+# The checkout: c1 (base), c2 (app and deploy/README.md change only, HEAD), c3 (compose.yml
+# change, not checked out).
 repo="$tmp/repo"
 cp -a "$src" "$repo/deploy"
 rm -rf "$repo/deploy/test"
@@ -26,10 +33,18 @@ g() { git -C "$repo" -c user.email=test@example.invalid -c user.name=test "$@"; 
 g init -q
 g add -A && g commit -qm c1
 c1="$(g rev-parse --short=12 HEAD)"
-echo change >"$repo/app.txt" && g add -A && g commit -qm c2-app
+echo change >"$repo/app.txt" && echo '# note' >>"$repo/deploy/README.md" && g add -A && g commit -qm c2-app
 c2="$(g rev-parse --short=12 HEAD)"
 echo '# change' >>"$repo/deploy/compose.yml" && g commit -qam c3-deploy
 c3="$(g rev-parse --short=12 HEAD)"
+fp() { g ls-tree -r "$1" -- deploy/ | "$repo/deploy/fingerprint.sh"; }
+tree_c2="$(fp "$c2")"
+tree_c3="$(fp "$c3")"
+if [[ "$(fp "$c1")" == "$tree_c2" && "$tree_c2" != "$tree_c3" ]]; then
+  echo "PASS  the fingerprint ignores deploy/README.md and changes with compose.yml"
+else
+  echo "FAIL  fingerprint: c1 $(fp "$c1"), c2 $tree_c2, c3 $tree_c3"; failed=1
+fi
 g -c advice.detachedHead=false checkout -q --detach "$c2"
 
 # /etc/piviki filled from the manifest, every value set (the optional ghcr.env stays empty).
@@ -48,10 +63,9 @@ fill_env() {
 fill_env
 
 d="$(date -u +%Y%m%d)"
-failed=0
 run() { # <name> <want exit> <ssh command>
   local name="$1" want="$2" got=0
-  PATH="$tmp/bin:$PATH" FAKE_DOCKER_LOG="$tmp/docker.log" PIVIKI_DEPLOY_TEST=1 \
+  PATH="$tmp/bin:$PATH" FAKE_DOCKER_LOG="$tmp/docker.log" FAKE_TREE="${FAKE_TREE-$tree_c2}" PIVIKI_DEPLOY_TEST=1 \
     PIVIKI_ETC_DIR="$tmp/etc" PIVIKI_STATE_DIR="$tmp/state" PIVIKI_LOCK="$tmp/lock" \
     bash "$repo/deploy/deploy.sh" "$3" >"$tmp/out" 2>&1 || got=$?
   if [[ "$got" == "$want" ]]; then
@@ -87,9 +101,30 @@ else
   echo "FAIL  host-checks.mjs ran without ENVIRONMENT=production"; failed=1
 fi
 
-run "a commit whose deploy/ differs is refused" 1 "deploy production $c3-$d"
-grep -q "deploy/ at $c3 differs" "$tmp/out" || { echo "FAIL  refusal names the deploy/ mismatch"; failed=1; }
-run "an unknown commit is refused" 1 "deploy production abcdefabcdef-$d"
+started_since() { # <log line count before>: did anything after the pull start containers?
+  tail -n +"$(($1 + 1))" "$tmp/docker.log" | grep -qE ' (up|run) '
+}
+before="$(wc -l <"$tmp/docker.log")"
+FAKE_TREE="$tree_c3" run "an image built with a different host runtime is refused" 1 "deploy production $c3-$d"
+grep -q "differs from the checkout" "$tmp/out" || { echo "FAIL  refusal names the deploy/ mismatch"; failed=1; }
+grep -q -- "--move-core $c3" "$tmp/out" || { echo "FAIL  refusal names --move-core with the tag's commit"; failed=1; }
+if started_since "$before"; then echo "FAIL  the mismatch was refused only after starting something"; failed=1
+else echo "PASS    ... before anything starts"; fi
+before="$(wc -l <"$tmp/docker.log")"
+FAKE_TREE="" run "an image without the host-runtime label is refused" 1 "deploy production $c2-$d"
+grep -q "has no fi.piviki.host-runtime label" "$tmp/out" || { echo "FAIL  refusal names the missing label"; failed=1; }
+if started_since "$before"; then echo "FAIL  the missing label was refused only after starting something"; failed=1
+else echo "PASS    ... before anything starts"; fi
+before="$(wc -l <"$tmp/docker.log")"
+FAKE_TREE="not-a-tree" run "a malformed host-runtime label is refused" 1 "deploy production $c2-$d"
+grep -q "malformed fi.piviki.host-runtime label" "$tmp/out" || { echo "FAIL  refusal names the malformed label"; failed=1; }
+if started_since "$before"; then echo "FAIL  the malformed label was refused only after starting something"; failed=1
+else echo "PASS    ... before anything starts"; fi
+expect_recorded "  ... and none of them is recorded" "$c2-$d" 2
+
+# The checkout never fetches, so a newer app-only tag names a commit it has never seen (AD-21).
+run "a commit the checkout does not have, same deploy/, deploys" 0 "deploy production abcdefabcdef-$d"
+expect_recorded "  ... and is recorded" "abcdefabcdef-$d" 3
 run "a malformed tag is refused" 1 "deploy production $c2"
 run "another environment is refused" 1 "deploy test $c2-$d"
 
@@ -103,13 +138,13 @@ fill_env
 sed -i '/^PIVIKI_CORE_DB_PASSWORD=/d' "$tmp/etc/postgres.env"
 run "a missing key is refused" 1 "deploy production $c2-$d"
 fill_env
-expect_recorded "refusals record nothing" "$c2-$d" 2
+expect_recorded "refusals record nothing" "abcdefabcdef-$d" 3
 
 FAKE_CHECKS_FAIL=1 run "failing in-network checks fail the deploy" 1 "deploy production $c1-$d"
 grep -q "NOT recorded" "$tmp/out" || { echo "FAIL  the failure says the tag is not recorded"; failed=1; }
-expect_recorded "  ... and leave the recorded tag and history unchanged" "$c2-$d" 2
+expect_recorded "  ... and leave the recorded tag and history unchanged" "abcdefabcdef-$d" 3
 
 run "status names environment, tag and checkout" 0 "status"
-if ! grep -qx "checkout=$c2" "$tmp/out" || ! grep -qx "tag=$c2-$d" "$tmp/out"; then echo "FAIL  status output"; failed=1; fi
+if ! grep -qx "checkout=$c2" "$tmp/out" || ! grep -qx "tag=abcdefabcdef-$d" "$tmp/out"; then echo "FAIL  status output"; failed=1; fi
 
 exit "$failed"

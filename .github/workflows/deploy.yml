@@ -3,8 +3,8 @@
 # never a public address; the host only pulls. Every deploy then runs the first-register, path
 # allowlist and one-connector checks against the target's own hosts and records the tag.
 # The checks are this repository's deploy/checks.sh at the tag's commit; the host refuses the
-# tag unless its piviki-core checkout has the same deploy/ (AD-21). piviki-infra is never
-# checked out here.
+# tag unless its piviki-core checkout has the host runtime the image was built with (the image's
+# fi.piviki.host-runtime label, deploy/fingerprint.sh; AD-21). piviki-infra is never checked out here.
 #
 # Per-environment configuration (Settings > Environments > production|test):
 #   vars:    ADMIN_HOST, API_HOST, SSH_HOST, CF_ACCOUNT_ID, CF_TUNNEL_ID, DEPLOY_SSH_KNOWN_HOSTS,
@@ -119,7 +119,8 @@ jobs:
           TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.CF_ACCESS_DEPLOY_CLIENT_SECRET }}
         # Pulls, migrates before the new core starts, starts it, then runs the first-register,
         # allowlist and health checks in-network (host-checks.mjs) before recording the tag. The
-        # host refuses the tag if its checkout's deploy/ differs from the tag's commit (AD-21).
+        # host refuses the tag if its checkout's host runtime differs from the one the image was
+        # built with (its fi.piviki.host-runtime label, compared after the pull; AD-21).
         run: ssh "$SSH_HOST" "deploy $TARGET $TAG" | tee deploy.txt
 
       - name: Deploy checks
