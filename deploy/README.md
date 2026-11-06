@@ -20,10 +20,15 @@ way this folder changes on a host. A deploy names only the image tag.
 ## The rule a deploy enforces
 
 `deploy.sh` refuses a tag `<commit>-<date>` unless the checkout is clean **and** its `deploy/` is
-identical to `deploy/` at `<commit>`. So:
+identical, in the files a host reads, to the `deploy/` the image was built with. `fingerprint.sh`
+hashes `git ls-tree -r` of `deploy/` without `README.md`, `compose.local.yml`, `local-env/`,
+`test/` and `checks.sh` (the runner runs it from the tag's own commit). CI stamps that fingerprint
+on every image (`fi.piviki.host-runtime`), and `deploy.sh` compares it with the checkout's after the
+pull, before anything starts. The checkout never fetches, so it does not need to know `<commit>`.
+Any other file under `deploy/`, a new one included, counts. So:
 
-- **A change only to the app** (no change under `deploy/`): deploy the new tag. The checkout stays
-  where it is.
+- **A change only to the app, or only to the files left out above**: deploy the new tag. The
+  checkout stays where it is.
 - **A change under `deploy/`** (Compose, Caddy, checks, manifest, an image digest): after the PR
   is merged and built, a founder moves the checkout, then deploys:
   ```sh
@@ -32,6 +37,7 @@ identical to `deploy/` at `<commit>`. So:
   Moving waits for any running deploy (they share a lock) and does not touch the running stack.
 - **A rollback** to a tag whose `deploy/` differs: move the checkout to that tag's commit first,
   then deploy the tag.
+- **An image without the label** (built before 2026-11-06) is refused: deploy a newer tag.
 
 If the manifest gains a file or key, re-run the full bootstrap after moving, so the empty
 entry is created, and fill it from Bitwarden before deploying.
