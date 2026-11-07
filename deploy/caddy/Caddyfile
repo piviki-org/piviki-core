@@ -55,6 +55,14 @@ http://{$CADDY_LISTEN::80} {
 		}
 		respond @foreignOrigin 403
 
+		# The bare host opens the admin: only a GET or HEAD of exactly `/`, temporary (302) so it can
+		# change later. Anything else at `/` still meets the Origin rule below and core.
+		@root {
+			path /
+			method GET HEAD
+		}
+		redir @root /admin 302
+
 		# GraphQL is off in core; never route it either.
 		@graphql path /api/graphql /api/graphql/* /api/graphql-playground /api/graphql-playground/*
 		respond @graphql 404
