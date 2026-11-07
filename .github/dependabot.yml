@@ -10,6 +10,11 @@ updates:
         patterns: ['payload', '@payloadcms/*']
       next-react:
         patterns: ['next', 'react', 'react-dom', '@types/react', '@types/react-dom']
+    ignore:
+      # @types/node follows the Node major in .node-version and the Dockerfile; a new major
+      # comes with a Node upgrade, done by hand.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
   - package-ecosystem: docker
     directory: /
     schedule:
