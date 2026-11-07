@@ -118,6 +118,12 @@ expect_access_redirect() {
 
 # Only where nothing sits in front of Caddy (local): on hosted targets these run in-network.
 admin_checks() {
+  echo "== admin root"
+  local got
+  got="$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 20 "${connect[@]}" "$admin/" || true)"
+  if [[ "$got" == "302 ${admin}/admin" ]]; then pass "admin / redirects to /admin ($got)"
+  else fail "admin /: want 302 to $admin/admin, got $got"; fi
+
   echo "== first-register"
   expect 404 "admin GET /admin/create-first-user" "$admin/admin/create-first-user"
   expect 404 "admin POST /api/librarians/first-register" \

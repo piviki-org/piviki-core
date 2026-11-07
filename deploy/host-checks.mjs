@@ -102,6 +102,7 @@ const checks = [
     '/api/librarians/login',
     { method: 'POST', headers: { ...json, Origin: ADMIN_ORIGIN }, body: '{"email":"check@invalid.example","password":"not-a-real-password"}' },
   ],
+  ['root: admin / redirects to /admin', 'to-admin', ADMIN_HOST, '/'],
   ['unknown host: foo.invalid', 404, 'foo.invalid', '/'],
   // Until the first librarian is seeded (the first deploy, AD-5), Payload redirects every admin
   // page to create-first-user, which Caddy answers 404 (checked above).
@@ -109,7 +110,9 @@ const checks = [
 ]
 
 // 'login': 200, or a redirect to create-first-user while no librarian exists yet.
+// 'to-admin': Caddy's 302 from the bare admin host to /admin.
 function matches(want, { code, location }) {
+  if (want === 'to-admin') return code === 302 && location === '/admin'
   if (want !== 'login') return code === want
   return code === 200 || ([302, 303, 307].includes(code) && /\/admin\/create-first-user$/.test(location))
 }
@@ -121,7 +124,7 @@ for (const [label, want, host, path, opts] of checks) {
   if (matches(want, got)) console.log(`PASS  ${label} (${shown})`)
   else {
     failures++
-    console.log(`FAIL  ${label}: want ${want === 'login' ? '200 or redirect to create-first-user' : want}, got ${shown}`)
+    console.log(`FAIL  ${label}: want ${want === 'login' ? '200 or redirect to create-first-user' : want === 'to-admin' ? '302 -> /admin' : want}, got ${shown}`)
   }
 }
 console.log(failures ? `${failures} host check(s) failed` : 'all host checks passed')
